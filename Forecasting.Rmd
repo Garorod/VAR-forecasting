@@ -1,0 +1,410 @@
+---
+title: "Multivariate Time Series"
+author: "Maxim Anisimov, Garik Vardanyan"
+date: "11/24/2018"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error=TRUE)
+```
+
+```{r libraries, echo=F, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(tseries)
+library(urca)
+library(forecast)
+library(gridExtra)
+library(zoo)
+library(tidyverse)
+library(rio)
+library(lubridate)
+library(xts)
+library(vars)
+library(caTools)
+```
+
+```{r plotting function}
+plot.varfevd  <-function (x, plot.type = c("multiple", "single"), names = NULL,
+    main = NULL, col = NULL, ylim = NULL, ylab = NULL, xlab = NULL,
+    legend = NULL, names.arg = NULL, nc, mar = par("mar"), oma = par("oma"),
+    addbars = 1, ...)
+{
+    K <- length(x)
+    ynames <- names(x)
+    plot.type <- match.arg(plot.type)
+    if (is.null(names)) {
+        names <- ynames
+    }
+    else {
+        names <- as.character(names)
+        if (!(all(names %in% ynames))) {
+            warning("\nInvalid variable name(s) supplied, using first variable.\n")
+            names <- ynames[1]
+        }
+    }
+    nv <- length(names)
+#    op <- par(no.readonly = TRUE)
+    ifelse(is.null(main), main <- paste("FEVD for", names), main <- rep(main,
+        nv)[1:nv])
+    ifelse(is.null(col), col <- gray.colors(K), col <- rep(col,
+        K)[1:K])
+    ifelse(is.null(ylab), ylab <- rep("Percentage", nv), ylab <- rep(ylab,
+        nv)[1:nv])
+    ifelse(is.null(xlab), xlab <- rep("Horizon", nv), xlab <- rep(xlab,
+        nv)[1:nv])
+    ifelse(is.null(ylim), ylim <- c(0, 1), ylim <- ylim)
+    ifelse(is.null(legend), legend <- ynames, legend <- legend)
+    if (is.null(names.arg))
+        names.arg <- c(paste(1:nrow(x[[1]])), rep(NA, addbars))
+    plotfevd <- function(x, main, col, ylab, xlab, names.arg,
+        ylim, ...) {
+        addbars <- as.integer(addbars)
+        if (addbars > 0) {
+            hmat <- matrix(0, nrow = K, ncol = addbars)
+            xvalue <- cbind(t(x), hmat)
+            barplot(xvalue, main = main, col = col, ylab = ylab,
+                xlab = xlab, names.arg = names.arg, ylim = ylim,
+                legend.text = legend, ...)
+            abline(h = 0)
+        }
+        else {
+            xvalue <- t(x)
+            barplot(xvalue, main = main, col = col, ylab = ylab,
+                xlab = xlab, names.arg = names.arg, ylim = ylim,
+                ...)
+            abline(h = 0)
+        }
+    }
+    if (plot.type == "single") {
+#        par(mar = mar, oma = oma)
+#        if (nv > 1)
+#            par(ask = TRUE)
+        for (i in 1:nv) {
+            plotfevd(x = x[[names[i]]], main = main[i], col = col,
+                ylab = ylab[i], xlab = xlab[i], names.arg = names.arg,
+                ylim = ylim, ...)
+        }
+    }
+    else if (plot.type == "multiple") {
+        if (missing(nc)) {
+            nc <- ifelse(nv > 4, 2, 1)
+        }
+        nr <- ceiling(nv/nc)
+        par(mfcol = c(nr, nc), mar = mar, oma = oma)
+        for (i in 1:nv) {
+            plotfevd(x = x[[names[i]]], main = main[i], col = col,
+                ylab = ylab[i], xlab = xlab[i], names.arg = names.arg,
+                ylim = ylim, ...)
+        }
+    }
+#    on.exit(par(op))
+}
+```
+
+For forecasting multivariate time series we have decided to choose UK data of:    
+1. GDP (Gross Domestic Product)    
+2. CPI (Consumer Price Index)     
+3. 10-year government bond yield spread between 10-year and 3-month UK government bonds.
+    
+We have found out that a system of GDP, CPI and interest rate is efficiently estimated especially in countries which have use inflation targeting. The United Kingdom is such country now (what about the past???): https://www.bankofengland.co.uk/monetary-policy.
+Thus, our model appears to be reasonable.
+We use quarterly data from 1975 to 2008 and divide data to train and test samples.
+
+```{r data preprocessing, echo=FALSE, warning=FALSE}
+data <- read_delim("~/Desktop/Time Series Homework/Data.csv", 
+                    ";", escape_double = FALSE, trim_ws = TRUE)
+data<-data.frame(data)
+a <- subset(data, select = -Date )
+cpi <- as.numeric(a[3,])
+CPI <- ts(cpi, start=c(1975), end=c(2018,2), frequency=4)
+
+autoplot(CPI)
+```
+As we can see from plot of CPI the Variance is stabilized and therefore there is no need to do Box transformation. 
+
+```{r Model Type, echo=FALSE, warning=FALSE}
+train <- window(CPI, end=c(2014, 4))
+test <- window(CPI, start=c(2015, 1))
+
+autoplot(diff(train))
+
+grid.arrange(ggAcf(train),ggPacf(train))
+```
+Because ACF of data is slowly decreasing we can see that there is a sign of unit root in our series. The PACF also indicates unit root. 
+
+```{r Stationarity test, echo = F, warning = F}
+adf.test(train,k = 4)
+adf.test(diff(train),k = 4)
+autoplot(diff(train))
+```
+Augmented Dickey-Fuller test suggests that for our initial time series null hypothesis of nonstationarity can not be rejected. We take first difference and we get that for the new series the null hypothesis of nonstationarity is rejected towards alternative hypothesis of stationarity at any viable level. 
+
+```{r Building model for prediction, echo = F, warning = F}
+model <- auto.arima(train)
+summary(model)
+grid.arrange(ggAcf(residuals(model)),ggPacf(residuals(model)))
+```
+
+Auto Arima suggests that our data is second order difference stationary. It computes that ARIMA(0,2,1) is the optimal choice for our data. ACF and PACF of residuals suggest that residuals are not White Noise. Now we will do Ljung-Box test to be sure that residuals are not White Noise. 
+
+```{r Portemanteu test, echo = F, warning = F}
+Box.test(residuals(model),lag =4, fitdf = 3,type = 'Ljung')
+```
+We get that null hypothesis can be rejected and there are not WN residuals in our model.
+
+```{r Finding optimal Arima parameters}
+a <- rep(0, times = 25)
+A <- matrix(a, nrow = 5)
+for (i in 1:5) {
+  for (j in 1:5) {
+    model <-  Arima(train, order = c(i-1,2,j-1))
+    A[i,j] <- model$aicc
+  }
+}
+
+a <- rep(0, times = 25)
+B <- matrix(a, nrow = 5)
+for (i in 1:5) {
+  for (j in 1:5) {
+    model <-  Arima(train, order = c(i-1,1,j-1))
+    B[i,j] <- model$aicc
+  }
+}
+A 
+B
+```
+Looking at different set of parameters we get that best model is Arima(4,2,4), now lets fit this model. We will try also other models Arima(4,1,4) and Arima(3,2,4) that have AIC close to 102, maybe in test data this models will be better,
+
+```{r Fitting optimal model}
+model <-  Arima(train, order = c(4,2,4))
+summary(model)
+grid.arrange(ggAcf(residuals(model)),ggPacf(residuals(model)))
+Box.test(residuals(model),lag =4, fitdf = 3,type = 'Ljung')
+
+model1 <-Arima(train, order = c(4,1,4))
+summary(model1)
+grid.arrange(ggAcf(residuals(model1)),ggPacf(residuals(model1)))
+Box.test(residuals(model1),lag =4, fitdf = 3,type = 'Ljung')
+
+model2 <-Arima(train, order = c(3,2,4))
+summary(model2)
+grid.arrange(ggAcf(residuals(model2)),ggPacf(residuals(model2)))
+Box.test(residuals(model2),lag =4, fitdf = 3,type = 'Ljung')
+```
+We get that null hypothesis can not be rejected and there are WN residuals in our model.
+```{r Forecasting series and checking normality of residuals,echo = F, warning = F}
+forec <- forecast(model, h=14) 
+autoplot(forecast(model, h=14)) + ylab("")
+jarque.bera.test(residuals(model))
+shapiro.test(residuals(model)) # good for small samples
+```
+
+```{r Checking residuals of other models}
+jarque.bera.test(residuals(model1))
+shapiro.test(residuals(model1))
+jarque.bera.test(residuals(model2))
+shapiro.test(residuals(model2))
+```
+
+We get from Jarque-Bera test and Shapiro test that our residuals are not normally distributed for all of our models, therefore confidence intervals are not correctly built. Now we will check accuracy of our model.
+
+```{r Accuracy}
+accuracy(forec,test)
+```
+
+```{r Cross Validation}
+test <- window(CPI, start=c(2013, 1))
+
+fore_arima_424 <- function(y, h) {
+  model <- Arima(y, order = c(4,2, 4))
+  forecast <- forecast(model, h)
+  return(forecast)
+}
+
+errors_cv <- tsCV(test, fore_arima_424, h = 1)
+forecaster <- errors_cv + test
+
+accuracy(forecaster,test)
+
+plot1 <- autoplot(cbind(train,forecaster))+ggtitle("ARIMA(4,2,4) with CV")
+plot2 <-autoplot(forecast(model, h=14))+ggtitle("ARIMA(4,2,4) without CV")
+plot3 <-autoplot(CPI)+ggtitle("Real CPI")
+grid.arrange(plot1,plot2,plot3,nrow = 3)
+```
+
+Obviously, cross validation with h = 1 works better than our initial model, as our data have in this case more information and doesn't forecast for 14 periods future. Note that we changed test in last step because we take difference and inside cross validation this first 2 of test will be NAN.
+
+
+```{r Multivariate Forecasting: Data Preprocessing}
+GDP <- import('/Users/garik/Desktop/Time Series Homework/Real_GDP-2.csv')
+CPI <- import('/Users/garik/Desktop/Time Series Homework/CPI-2.csv')
+BondYield10Y <- import('/Users/garik/Desktop/Time Series Homework/Bond_Yield_10Y-2.csv')
+BondYield3M <- import('/Users/garik/Desktop/Time Series Homework/yield3_2.csv')
+
+BondYield3M$Yield <- as.numeric(BondYield3M$Yield)
+colnames(BondYield3M)[1] <- 'DATE'
+
+GDP$DATE <- as.Date(GDP$DATE,"%d/%m/%Y")
+CPI$DATE <- as.Date(CPI$DATE,"%d/%m/%Y")
+BondYield10Y$DATE <- as.Date(BondYield10Y$DATE, "%Y-%m-%d") 
+BondYield3M$DATE <- as.Date(seq(as.Date('1975-01-01'), as.Date('2018-04-01'), by = "quarter"), "%Y-%m-%d")
+
+CPI_1 <- CPI %>% filter(DATE >= GDP$DATE[1])
+BondYield10Y_1 <- BondYield10Y %>% filter(DATE >= GDP$DATE[1])
+BondYield3M_1 <- BondYield3M %>% filter(DATE >= GDP$DATE[1])
+
+BondYield10Y_1$YearQ <- quarter(BondYield10Y_1$DATE, with_year = T)
+BondYield10Y_2 <- aggregate(IRLTLT01GBM156N ~ YearQ, BondYield10Y_1, mean)
+BondYield10Y_2$DATE <- seq(BondYield10Y_1$DATE[1], BondYield10Y_1$DATE[nrow(BondYield10Y_1)], by = "quarter")
+BondYield10Y_2 <- BondYield10Y_2[, c('DATE', 'IRLTLT01GBM156N')]
+BondYield10Y_2 <- BondYield10Y_2 %>% filter(DATE <= '2018-04-01')
+
+BondYieldSpread <- BondYield10Y_2 - BondYield3M_1
+BondYieldSpread$DATE <- BondYield10Y_2$DATE
+
+all_data <- Reduce(function(...) merge(..., all=TRUE), list(GDP, CPI_1, BondYieldSpread))
+colnames(all_data) <- c('Date', 'GDP', 'CPI', 'BondYieldSpread')
+
+data <- all_data %>% filter(Date <= '2018-01-01')
+
+ts_data <- to.quarterly(xts(data[,-1], order.by=as.Date(data[,1], "%m/%d/%Y")), OHLC=F)
+autoplot(ts_data$GDP)
+autoplot(ts_data$CPI)
+autoplot(ts_data$BondYieldSpread)
+
+# train-test split
+test_size <- 8
+train_size <- nrow(ts_data) - 8
+
+ts_train <- head(ts_data, train_size)
+ts_test <- tail(ts_data, test_size)
+```
+
+```{r Stationarity Check}
+adf.test(na.omit(diff(diff(ts_train$GDP)))) # statinonary
+adf.test(na.omit(diff(ts_train$GDP))) # stationary
+adf.test(ts_train$GDP) # not stationary
+adf.test(na.omit(diff(ts_train$GDP)))
+
+adf.test(na.omit(diff(diff(ts_train$BondYieldSpread)))) # stationary
+adf.test(na.omit(diff(ts_train$BondYieldSpread))) # stationary
+adf.test(ts_train$BondYieldSpread) # stationary at 5%
+
+adf.test(na.omit(diff(diff(ts_train$CPI)))) # stationary
+adf.test((na.omit(diff(log(ts_train$CPI))))) # stationary at 6 %
+adf.test(log(ts_train$CPI)) # not stationary
+
+ts_stationary_data <- na.omit(diff(ts_data))
+colnames(ts_stationary_data) <- c('GDP_diff', 'BondYieldSpread_diff', 'CPI_diff')
+ts_stationary_train <- head(ts_stationary_data, train_size)
+ts_stationary_test <- tail(ts_stationary_data, test_size)
+```
+
+```{r Lag Coice, echo=FALSE, warning=FALSE}
+VARselect(ts_stationary_train, lag.max = 10, type = "const")$selection
+```
+
+
+```{r VAR Model, echo=FALSE}
+var_model4 <- VAR(as.ts(ts_stationary_train), p = 4, type = "const")
+serial.test(var_model4, lags.pt = 12, type = "PT.asymptotic") # no corr ar 11% 
+serial.test(var_model4, lags.pt = 12, type = "BG") # no corr
+
+var_model3 <- VAR(as.ts(ts_stationary_train), p = 3, type = "const")
+serial.test(var_model3, lags.pt = 12, type = "PT.asymptotic") # no corr
+serial.test(var_model3, lags.pt = 12, type = "BG") # no corr
+
+# As out aim to build parsimonious model without autocorrelated errors, 
+# we will choose between VARs with 3 and 4 lags.
+
+normality.test(var_model4, multivariate.only = FALSE)
+normality.test(var_model3, multivariate.only = FALSE)
+# errors are not normal in both models
+summary(var_model4)
+summary(var_model3)
+```
+
+```{r Forecasting, echo=FALSE}
+var_model4_fcst <- forecast(var_model4, h = test_size)
+var_model3_fcst <- forecast(var_model3, h = test_size)
+
+accuracy(snaive(ts_stationary_train$GDP_diff, h=test_size), ts_stationary_test$GDP_diff)
+accuracy(var_model4_fcst$forecast$GDP_diff, ts_stationary_test$GDP_diff)
+accuracy(var_model3_fcst$forecast$GDP_diff, ts_stationary_test$GDP_diff)
+
+accuracy(snaive(ts_stationary_train$CPI_diff, h=test_size), ts_stationary_test$CPI_diff)
+accuracy(var_model4_fcst$forecast$CPI_diff, ts_stationary_test$CPI_diff)
+accuracy(var_model3_fcst$forecast$CPI_diff, ts_stationary_test$CPI_diff)
+
+accuracy(naive(ts_stationary_train$BondYieldSpread_diff, h=test_size), ts_stationary_test$BondYieldSpread_diff)
+accuracy(var_model4_fcst$forecast$BondYieldSpread_diff, ts_stationary_test$BondYieldSpread_diff)
+accuracy(var_model3_fcst$forecast$BondYieldSpread_diff, ts_stationary_test$BondYieldSpread_diff)
+
+# GDP and bond yield spread differences are forecast better using VAR(3), while CPI difference is a little better modelled on the test sample using VAR(4). As we seek finding a parsimonious model with good forecasting quality, we choose as a final model VAR(3) because it has fewer lags and predicts 2 out of variables more accurately that VAR(4) does.
+
+VAR_plot_fsct <- autoplot(var_model3_fcst)
+VAR_plot_actual <- autoplot(ts_stationary_data)
+gdp_plot_fcst <- autoplot(var_model3_fcst$forecast$GDP_diff)
+cpi_plot_fcst <- autoplot(var_model3_fcst$forecast$CPI_diff)
+bondyieldspread_plot_fcst <- autoplot(var_model3_fcst$forecast$BondYieldSpread_diff)
+
+head(ts_stationary_data)
+gdp_plot_actual <- autoplot(ts_stationary_data[, 1]) + labs(title='Actual Data', xlab='Time')
+cpi_plot_actual <- autoplot(ts_stationary_data[, 3]) + labs(title='Actual Data', xlab='Time')
+bondyieldspread_plot_actual <- autoplot(ts_stationary_data[, 2]) + labs(title='Actual Data', xlab='Time')
+
+# head(tail(ts_data, 9), 8)$GDP + var_model4_fcst$forecast$GDP.diff$mean
+#head(tail(ts_data, 9), 8)$CPI + var_model4_fcst$forecast$CPI.diff$mean
+#head(tail(ts_data, 9), 8)$BondYield + var_model4_fcst$forecast$Bond.Yield.diff$mean
+
+grid.arrange(gdp_plot_fcst, gdp_plot_actual, 
+             cpi_plot_fcst,  cpi_plot_actual,
+             bondyieldspread_plot_fcst, bondyieldspread_plot_actual,
+             nrow=3, ncol=2)
+```
+Note: confidence intervals are not reliable as errors are not normal.
+
+
+Next, we use structural analysis to our VAR model.
+```{r Structural Analysis}
+# changing order
+ts_var_3_train <- cbind(ts_stationary_train$GDP_diff, ts_stationary_train$CPI_diff, ts_stationary_train$BondYieldSpread_diff)
+
+var_3 <- VAR(ts_var_3_train, p = 3, type = "const")
+summary(var_3)$covres
+summary(var_3)$corres
+# Here we can see Cholesky decomposed matrix B^{-1}
+Omega_hat <- summary(var_3)$covres
+# these two matrices must be indentical
+chol(Omega_hat)%>%t()
+Psi(var_3)[,,1]
+
+# ortho = TRUE - usage of Choleski decomposition (default)
+plot(irf(var_3, impulse = "GDP_diff", response = c("CPI_diff", 
+        "BondYieldSpread_diff"), n.ahead = test_size, cumulative=T))
+plot(irf(var_3, impulse = "GDP_diff", response = c("CPI_diff", 
+        "BondYieldSpread_diff"), n.ahead = test_size, cumulative=T))
+plot(irf(var_3, impulse = "GDP_diff", response = c("GDP_diff"), n.ahead = test_size, cumulative = TRUE))
+
+plot(irf(var_3, impulse = "CPI_diff", response = c("CPI_diff", "BondYieldSpread_diff"), n.ahead = test_size, cumulative = TRUE))
+plot(irf(var_3, impulse = "CPI_diff", response = c("GDP_diff"), n.ahead = test_size, cumulative = TRUE))
+
+plot(irf(var_3, impulse = "BondYieldSpread_diff", response = c("CPI_diff", 
+        "BondYieldSpread_diff"), n.ahead = test_size, cumulative = TRUE))
+plot(irf(var_3, impulse = "BondYieldSpread_diff", response = c("GDP_diff"), n.ahead = test_size, cumulative = TRUE))
+
+# Next we make forecast error decomposition
+
+# The forecast error variance decomposition (henceforth: FEVD) is based upon  the #orthogonalised impulse response coefficient matrices Ψn (see sec- tion 2.7 # above). The FEVD allows the user to analyse the contribution of variable j to # the h-step forecast error variance of variable k. If the elementwise squared # orthogonalised impulse reponses are divided by the variance of the forecast  # error variance, σk2(h), the resultant is a percent- age figure.
+
+# The FEVD allows the user to analyse the contribution
+# of variable j to the h-step forecast error variance of variable k.
+svarfevd <- fevd(var_3, n.ahead = test_size)
+svarfevd
+plot.varfevd(svarfevd, plot.type = "single", col=1:3)
+```
